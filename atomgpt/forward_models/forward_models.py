@@ -54,6 +54,7 @@ class TrainingPropConfig(BaseSettings):
     desc_type: str = "desc_3"
     batch_size: int = 16
     max_length: int = 512
+    num_prefix_tokens: int = 10
     num_epochs: int = 500
     latent_dim: int = 1024
     learning_rate: float = 1e-3
@@ -280,6 +281,19 @@ class AtomGPTDataset(Dataset):
         )
 
 
+class PromptEmbedding(torch.nn.Module):
+    """Trainable prefix embeddings for prompt distillation."""
+
+    def __init__(self, num_tokens, hidden_size):
+        super().__init__()
+        self.embeddings = torch.nn.Parameter(
+            torch.randn(num_tokens, hidden_size)
+        )
+
+    def forward(self, batch_size):
+        return self.embeddings.unsqueeze(0).expand(batch_size, -1, -1)
+
+
 # Example usage
 
 
@@ -442,15 +456,18 @@ def main(config_file=None):
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
 
+    prompt_encoder = PromptEmbedding(
+        config.num_prefix_tokens, model.config.hidden_size
+    ).to(device)
+
     # batch_size = 16
     # max_length = 128
     # num_epochs = 100
     # learning_rate = 5e-5
     criterion = torch.nn.L1Loss()
-    # Define example regression data (texts and corresponding numeric targets)
-    """    
+    """
     ##############################
-    ###Fast test###    
+    ###Fast test###
     train_texts = [
         "This is the first example text.",
         "Second example is a bit longer than the first one, but still within the max length.",
@@ -464,7 +481,7 @@ def main(config_file=None):
     val_ids_temp = test_ids_temp = train_ids_temp
     batch_size = 2
     num_epochs = 3
-    
+
     ##############################
     ##############################
     """
@@ -500,7 +517,10 @@ def main(config_file=None):
     if torch.cuda.device_count() > 1:
         device_ids = [d for d in range(torch.cuda.device_count())]
         model = torch.nn.DataParallel(model, device_ids=device_ids).cuda()
-    optimizer = AdamW(model.parameters(), lr=learning_rate)
+    optimizer = AdamW(
+        list(model.parameters()) + list(prompt_encoder.parameters()),
+        lr=learning_rate,
+    )
     # optimizer = transformers.AdamW(model.parameters(), lr=learning_rate)
     # Prepare datasets and dataloaders with data collator
     # TODO: knc6 change later
@@ -537,6 +557,36 @@ def main(config_file=None):
         # pct_start=pct_start,
         pct_start=0.3,
     )
+
+    def forward_with_prefix(input_ids, attention_mask):
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+            attention_mask = attention_mask.unsqueeze(0)
+        inputs_embeds = model.get_input_embeddings()(input_ids.to(device))
+        batch_size = inputs_embeds.size(0)
+        prefix = prompt_encoder(batch_size)
+        inputs_embeds = torch.cat([prefix, inputs_embeds], dim=1)
+        prefix_mask = torch.ones(
+            (batch_size, config.num_prefix_tokens),
+            dtype=attention_mask.dtype,
+            device=device,
+        )
+        attn_mask = torch.cat([prefix_mask, attention_mask.to(device)], dim=1)
+        if "t5" in model_name:
+            out = model(
+                inputs_embeds=inputs_embeds,
+                decoder_inputs_embeds=inputs_embeds,
+                attention_mask=attn_mask,
+            )
+        else:
+            out = model(inputs_embeds=inputs_embeds, attention_mask=attn_mask)
+
+        logits = out.logits.squeeze(-1)
+        if logits.dim() == 1:
+            logits = logits.unsqueeze(0)
+        mask = attn_mask.to(logits.dtype)
+        logits = (logits * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1e-8)
+        return logits
     # output_dir = prefix + "_out"  # + model_name + "_" + dataset + "_" + prop
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -547,28 +597,13 @@ def main(config_file=None):
     for epoch in range(num_epochs):
         model.train()
         t1 = time.time()
+        train_loss = 0
         for batch in train_dataloader:
             optimizer.zero_grad()
-            train_loss = 0
             # train_result = []
-            input_ids = batch[0]["input_ids"].squeeze()  # .squeeze(0)
-            if "t5" in model_name:
-                predictions = (
-                    model(
-                        input_ids.to(device),
-                        decoder_input_ids=input_ids.to(device),
-                    )
-                    .logits.squeeze()
-                    .mean(dim=-1)
-                )
-            else:
-                predictions = (
-                    model(
-                        input_ids.to(device),
-                    )
-                    .logits.squeeze()
-                    .mean(dim=-1)
-                )
+            input_ids = batch[0]["input_ids"].squeeze()
+            attention_mask = batch[0]["attention_mask"].squeeze()
+            predictions = forward_with_prefix(input_ids, attention_mask)
             targets = batch[2].squeeze()
             loss = criterion(
                 predictions.squeeze(), targets.squeeze().to(device)
@@ -594,25 +629,10 @@ def main(config_file=None):
         f.write("id,target,predictions\n")
         with torch.no_grad():
             for batch in val_dataloader:
-                input_ids = batch[0]["input_ids"].squeeze()  # .squeeze(0)
+                input_ids = batch[0]["input_ids"].squeeze()
+                attention_mask = batch[0]["attention_mask"].squeeze()
                 ids = batch[1]
-                if "t5" in model_name:
-                    predictions = (
-                        model(
-                            input_ids.to(device),
-                            decoder_input_ids=input_ids.to(device),
-                        )
-                        .logits.squeeze()
-                        .mean(dim=-1)
-                    )
-                else:
-                    predictions = (
-                        model(
-                            input_ids.to(device),
-                        )
-                        .logits.squeeze()
-                        .mean(dim=-1)
-                    )
+                predictions = forward_with_prefix(input_ids, attention_mask)
                 targets = batch[2].squeeze()
                 # print('val',predictions,targets)
                 loss = criterion(
@@ -679,25 +699,9 @@ def main(config_file=None):
                 f.write("id,target,predictions\n")
                 test_loss = 0
                 for batch in test_dataloader:
-                    input_ids = batch[0]["input_ids"].squeeze()  # .squeeze(0)
-                    if "t5" in model_name:
-                        predictions = (
-                            model(
-                                input_ids.to(device),
-                                decoder_input_ids=input_ids.to(device),
-                            )
-                            .logits.squeeze()
-                            .mean(dim=-1)
-                        )
-
-                    else:
-                        predictions = (
-                            model(
-                                input_ids.to(device),
-                            )
-                            .logits.squeeze()
-                            .mean(dim=-1)
-                        )
+                    input_ids = batch[0]["input_ids"].squeeze()
+                    attention_mask = batch[0]["attention_mask"].squeeze()
+                    predictions = forward_with_prefix(input_ids, attention_mask)
                     ids = batch[1]
                     targets = batch[2].squeeze()
                     loss = criterion(
@@ -766,20 +770,9 @@ def main(config_file=None):
     f.write("id,target,predictions\n")
     for batch in test_dataloader:
         optimizer.zero_grad()
-        input_ids = batch[0]["input_ids"].squeeze()  # .squeeze(0)
-        if "t5" in model_name:
-            predictions = (
-                model(
-                    input_ids.to(device),
-                    decoder_input_ids=input_ids.to(device),
-                )
-                .logits.squeeze()
-                .mean(dim=-1)
-            )
-        else:
-            predictions = (
-                model(input_ids.to(device)).logits.squeeze().mean(dim=-1)
-            )
+        input_ids = batch[0]["input_ids"].squeeze()
+        attention_mask = batch[0]["attention_mask"].squeeze()
+        predictions = forward_with_prefix(input_ids, attention_mask)
         ids = batch[1]
         targets = batch[2].squeeze()
         if len(ids) == 1:
