@@ -40,9 +40,7 @@ class AtomGPTPredictorLMhead(torch.nn.Module):
         self.n_out = n_out
         self.latent_dim = latent_dim
         if "t5" in model_name:
-            model = transformers.T5ForConditionalGeneration.from_pretrained(
-                model_name
-            )
+            model = transformers.T5ForConditionalGeneration.from_pretrained(model_name)
         else:
             # config = GPT2Config.from_pretrained("gpt2")
             # model = GPT2Model(config)
@@ -63,8 +61,9 @@ class AtomGPTPredictorLMhead(torch.nn.Module):
         self.model = model
 
     def forward(self, input_ids):
+        """Run a forward pass of the underlying language model."""
         # outputs = self.model(input_ids)
-        if "t5" in model_name:
+        if "t5" in self.model_name:
             outputs = self.model(input_ids, decoder_input_ids=input_ids)
         else:
             outputs = self.model(input_ids)
