@@ -30,7 +30,7 @@ import pprint
 import sys
 import argparse
 from torch.optim import AdamW
-
+from CustomAtoms import  CustomAtoms
 # from alignn.pretrained import get_figshare_model
 from atomgpt.inverse_models.utils import get_figlet
 
@@ -266,6 +266,7 @@ class AtomGPTDataset(Dataset):
         return len(self.texts)
 
     def __getitem__(self, idx):
+        print(self.texts[idx])
         inputs = self.tokenizer(
             self.texts[idx],
             return_tensors="pt",
@@ -297,7 +298,6 @@ class PromptEmbedding(torch.nn.Module):
 
 # Example usage
 
-123131232132132132
 def main(config_file=None):
     figlet = get_figlet()
     print(figlet)
@@ -345,7 +345,7 @@ def main(config_file=None):
             info["prop"] = [float(j) for j in i[1:]]  # float(i[1])
             pth = os.path.join(run_path, info["id"])
             if config.convert:
-                atoms = Atoms.from_poscar(pth)
+                atoms = CustomAtoms.from_poscar(pth)
                 lines = atoms.describe(include_mineral_name=False)[
                     config.desc_type
                 ]
@@ -358,6 +358,7 @@ def main(config_file=None):
     else:
         dat = loadjson(id_prop_path)
     print("len", len(dat))
+    print(dat[0])
     prefix = config.prefix
     model_name = config.model_name
     batch_size = config.batch_size
@@ -437,6 +438,8 @@ def main(config_file=None):
     print("train_ids", len(id_train))
     # model_name = "mistralai/Mistral-7B-Instruct-v0.1"
     # model_name = "gpt2"
+    print(model_name)
+    print('-------')
     if "t5" in model_name:
         model = transformers.T5ForConditionalGeneration.from_pretrained(
             model_name
