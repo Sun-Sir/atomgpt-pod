@@ -30,7 +30,8 @@ import pprint
 import sys
 import argparse
 from torch.optim import AdamW
-from CustomAtoms import  CustomAtoms
+# Local CustomAtoms provides simplified attribute-only descriptions
+from .CustomAtoms import CustomAtoms
 # from alignn.pretrained import get_figshare_model
 from atomgpt.inverse_models.utils import get_figlet
 
