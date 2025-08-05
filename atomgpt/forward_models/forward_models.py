@@ -294,6 +294,7 @@ class PromptEmbedding(torch.nn.Module):
         return self.embeddings.unsqueeze(0).expand(batch_size, -1, -1)
 
 
+
 # Example usage
 
 123131232132132132
@@ -580,7 +581,13 @@ def main(config_file=None):
             )
         else:
             out = model(inputs_embeds=inputs_embeds, attention_mask=attn_mask)
-        return out.logits.squeeze().mean(dim=-1)
+        logits = out.logits.squeeze(-1)
+        if logits.dim() == 1:
+            logits = logits.unsqueeze(0)
+        mask = attn_mask.to(logits.dtype)
+        logits = (logits * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1e-8)
+        return logits
+
     # output_dir = prefix + "_out"  # + model_name + "_" + dataset + "_" + prop
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
