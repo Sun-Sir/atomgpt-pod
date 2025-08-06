@@ -56,6 +56,7 @@ class TrainingPropConfig(BaseSettings):
     batch_size: int = 16
     max_length: int = 512
     num_prefix_tokens: int = 10
+    use_prompt_embedding: bool = True
     num_epochs: int = 500
     latent_dim: int = 1024
     learning_rate: float = 1e-3
@@ -379,6 +380,7 @@ def main(config_file=None):
     test_ratio = config.test_ratio
     output_dir = config.output_dir
     keep_data_order = config.keep_data_order
+    use_prompt_embedding = config.use_prompt_embedding
     if not os.path.exists(config.output_dir):
         os.makedirs(config.output_dir)
     f = open(os.path.join(config.output_dir, "config.json"), "w")
@@ -461,9 +463,12 @@ def main(config_file=None):
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
 
-    prompt_encoder = PromptEmbedding(
-        config.num_prefix_tokens, model.config.hidden_size
-    ).to(device)
+    if use_prompt_embedding:
+        prompt_encoder = PromptEmbedding(
+            config.num_prefix_tokens, model.config.hidden_size
+        ).to(device)
+    else:
+        prompt_encoder = None
 
     # batch_size = 16
     # max_length = 128
@@ -522,10 +527,13 @@ def main(config_file=None):
     if torch.cuda.device_count() > 1:
         device_ids = [d for d in range(torch.cuda.device_count())]
         model = torch.nn.DataParallel(model, device_ids=device_ids).cuda()
-    optimizer = AdamW(
-        list(model.parameters()) + list(prompt_encoder.parameters()),
-        lr=learning_rate,
-    )
+    if use_prompt_embedding:
+        optimizer = AdamW(
+            list(model.parameters()) + list(prompt_encoder.parameters()),
+            lr=learning_rate,
+        )
+    else:
+        optimizer = AdamW(model.parameters(), lr=learning_rate)
     # optimizer = transformers.AdamW(model.parameters(), lr=learning_rate)
     # Prepare datasets and dataloaders with data collator
     # TODO: knc6 change later
@@ -568,15 +576,18 @@ def main(config_file=None):
             input_ids = input_ids.unsqueeze(0)
             attention_mask = attention_mask.unsqueeze(0)
         inputs_embeds = model.get_input_embeddings()(input_ids.to(device))
-        batch_size = inputs_embeds.size(0)
-        prefix = prompt_encoder(batch_size)
-        inputs_embeds = torch.cat([prefix, inputs_embeds], dim=1)
-        prefix_mask = torch.ones(
-            (batch_size, config.num_prefix_tokens),
-            dtype=attention_mask.dtype,
-            device=device,
-        )
-        attn_mask = torch.cat([prefix_mask, attention_mask.to(device)], dim=1)
+        if use_prompt_embedding:
+            batch_size = inputs_embeds.size(0)
+            prefix = prompt_encoder(batch_size)
+            inputs_embeds = torch.cat([prefix, inputs_embeds], dim=1)
+            prefix_mask = torch.ones(
+                (batch_size, config.num_prefix_tokens),
+                dtype=attention_mask.dtype,
+                device=device,
+            )
+            attn_mask = torch.cat([prefix_mask, attention_mask.to(device)], dim=1)
+        else:
+            attn_mask = attention_mask.to(device)
         if "t5" in model_name:
             out = model(
                 inputs_embeds=inputs_embeds,
